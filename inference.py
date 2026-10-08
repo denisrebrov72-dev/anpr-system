@@ -178,25 +178,34 @@ class CRNNRecognizer:
         return text, to_cyrillic(text), plate_image, score
 
     def _decode_with_score(self, preds: torch.Tensor) -> Tuple[str, float]:
-        probs = preds.permute(1, 0, 2)[0]
+        # preds: (T, B, C) в log_softmax
+        probs = preds.permute(1, 0, 2)[0]  # (T, C)
         idxs = probs.argmax(dim=1)
         max_log_probs = probs.gather(1, idxs.unsqueeze(1)).squeeze(1)
+
         decoded_seq = []
         chosen_probs = []
-        last_char_idx = 0
+        last_char_idx = 0  # 0 = blank/CTC-разделитель
+
         for pos, char_idx in enumerate(idxs.tolist()):
-            if char_idx != 0 and char_idx != last_char_idx:
+            if char_idx == 0:
+                # blank — сбрасываем "последний символ", чтобы
+                # одинаковые символы через blank давали ДВА символа
+                last_char_idx = 0
+                continue
+            if char_idx != last_char_idx:
                 decoded_seq.append(self.int_to_char.get(char_idx, ''))
                 chosen_probs.append(max_log_probs[pos].item())
             last_char_idx = char_idx
+
         text = "".join(decoded_seq)
         if not chosen_probs:
             return text, 0.0
+
         mean_log_prob = sum(chosen_probs) / len(chosen_probs)
         score = float(torch.exp(torch.tensor(mean_log_prob)).item())
         score = max(0.0, min(1.0, score))
         return text, score
-
 
 class Visualizer:
     @staticmethod

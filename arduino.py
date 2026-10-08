@@ -15,16 +15,15 @@ from config import (
 
 
 class ArduinoController:
-    """Управление шлагбаумом через Serial-команды.
+    """Управление индикацией доступа (зелёный/красный светодиод).
 
     Протокол (текстовый, \n как разделитель):
-      → OPEN      ← OK:OPEN
-      → CLOSE     ← OK:CLOSE
+      → GREEN     ← OK:GREEN   (свой номер — зелёный на 3 сек)
+      → RED       ← OK:RED     (чужой номер — красный на 3 сек)
+      → CLOSE     ← OK:CLOSE   (выключить оба)
       → PING      ← PONG
-      → DIST      ← DIST:<см>
 
-    Arduino сам закрывает шлагбаум через OPEN_DURATION_MS после OPEN.
-    Python дополнительно страхует закрытие.
+    Arduino сам гасит светодиод через HOLD_MS после включения.
     """
 
     def __init__(self):
@@ -138,9 +137,18 @@ class ArduinoController:
             return False
 
     # ─────────────────────────────────────────────────────────────
-    #  ОТКРЫТИЕ ШЛАГБАУМА
+    #  ИНДИКАЦИЯ ДОСТУПА
     # ─────────────────────────────────────────────────────────────
-    def open_barrier(self):
+    def signal_green(self):
+        """Свой номер — зажечь зелёный светодиод."""
+        self._send_async("GREEN", expect="OK:GREEN")
+
+    def signal_red(self):
+        """Чужой номер — зажечь красный светодиод."""
+        self._send_async("RED", expect="OK:RED")
+
+    def _send_async(self, cmd: str, expect: str = None):
+        """Отправляет команду в отдельном потоке, чтобы не блокировать UI."""
         if not ARDUINO_ENABLED or not PYSERIAL_AVAILABLE:
             return
         if self._closing:
@@ -153,9 +161,9 @@ class ArduinoController:
             with self._lock:
                 if self.serial is None or self._closing:
                     return
-                ok = self._send_command("OPEN", expect="OK:OPEN", timeout=1.5)
+                ok = self._send_command(cmd, expect=expect, timeout=1.5)
                 if not ok:
-                    print("[WARN] Arduino не подтвердила OPEN")
+                    print(f"[WARN] Arduino не подтвердила {cmd}")
 
         thread = threading.Thread(target=_worker, daemon=True)
         self._worker_thread = thread
@@ -164,31 +172,6 @@ class ArduinoController:
     # ─────────────────────────────────────────────────────────────
     #  ДИАГНОСТИКА
     # ─────────────────────────────────────────────────────────────
-    def measure_distance_cm(self):
-        """Запрашивает расстояние с HC-SR04. Возвращает int (см) или None."""
-        if not self.is_connected or self.serial is None:
-            return None
-        with self._lock:
-            if self.serial is None:
-                return None
-            try:
-                self.serial.reset_input_buffer()
-                self.serial.write(b"DIST\n")
-                self.serial.flush()
-
-                deadline = time.time() + 2.0
-                while time.time() < deadline:
-                    line = self.serial.readline().decode("ascii", errors="ignore").strip()
-                    if line.startswith("DIST:"):
-                        try:
-                            return int(line.split(":", 1)[1])
-                        except ValueError:
-                            return None
-                return None
-            except Exception as e:
-                print(f"[WARN] DIST: {e}")
-                return None
-
     def get_status_text(self) -> str:
         if not ARDUINO_ENABLED:
             return "🔌 Arduino: отключена (симуляция)"

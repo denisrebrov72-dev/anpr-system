@@ -193,7 +193,7 @@ class ANPRApp(ctk.CTkFrame):
 
         self.chk_barrier = ctk.CTkCheckBox(
             controls_row,
-            text="🚪  Открывать шлагбаум для своих номеров",
+            text="🚦  Показывать индикацию доступа (зелёный/красный)",
             variable=self.barrier_enabled_var,
             font=ctk.CTkFont(size=13, weight="bold"),
             checkbox_width=22, checkbox_height=22,
@@ -735,13 +735,13 @@ class ANPRApp(ctk.CTkFrame):
                     self._status_cache[track_id] = "allowed"
                 barrier_on = bool(self.barrier_enabled_var.get())
                 if barrier_on:
-                    self.arduino.open_barrier()
+                    self.arduino.signal_green()
                     barrier_opened = 1
-                    self.lbl_det_status.configure(text="✅ РАЗРЕШЁН — открываем",
+                    self.lbl_det_status.configure(text="✅ РАЗРЕШЁН — зелёный",
                                                   text_color=COLOR_SUCCESS)
-                    winner = "allowed+open"
+                    winner = "allowed+green"
                 else:
-                    self.lbl_det_status.configure(text="✅ РАЗРЕШЁН (шлагбаум выкл)",
+                    self.lbl_det_status.configure(text="✅ РАЗРЕШЁН (индикация выкл)",
                                                   text_color=COLOR_SUCCESS)
                     winner = "allowed"
                 self.lbl_det_plate.configure(text=to_cyrillic(plate_text),
@@ -756,9 +756,10 @@ class ANPRApp(ctk.CTkFrame):
             else:
                 if track_id is not None:
                     self._status_cache[track_id] = "denied"
+                self.arduino.signal_red()
                 self.lbl_det_plate.configure(text=to_cyrillic(plate_text),
                                              text_color=COLOR_TEXT_NORMAL)
-                self.lbl_det_status.configure(text="⛔ НЕТ ДОСТУПА",
+                self.lbl_det_status.configure(text="⛔ НЕТ ДОСТУПА — красный",
                                               text_color=COLOR_REVIEW_DET_TEXT)
                 self.lbl_det_time.configure(text=datetime.now().strftime("%H:%M:%S"))
                 winner = "denied"
@@ -875,15 +876,16 @@ class ANPRApp(ctk.CTkFrame):
         else:
             allowed_info = is_allowed_plate(plate_norm)
             if allowed_info and self.barrier_enabled_var.get():
-                self.arduino.open_barrier()
+                self.arduino.signal_green()
                 barrier_opened = 1
-                self.lbl_det_status.configure(text="✅ РАЗРЕШЁН — открываем",
+                self.lbl_det_status.configure(text="✅ РАЗРЕШЁН — зелёный",
                                               text_color=COLOR_SUCCESS)
             elif allowed_info:
-                self.lbl_det_status.configure(text="✅ РАЗРЕШЁН (шлагбаум выкл)",
+                self.lbl_det_status.configure(text="✅ РАЗРЕШЁН (индикация выкл)",
                                               text_color=COLOR_SUCCESS)
             else:
-                self.lbl_det_status.configure(text="⛔ НЕТ ДОСТУПА",
+                self.arduino.signal_red()
+                self.lbl_det_status.configure(text="⛔ НЕТ ДОСТУПА — красный",
                                               text_color=COLOR_REVIEW_DET_TEXT)
 
         self.lbl_det_plate.configure(text=chosen_cyr or to_cyrillic(chosen_text),
