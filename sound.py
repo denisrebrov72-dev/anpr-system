@@ -18,7 +18,7 @@ else:
 
 class SoundPlayer:
     """Плеер звуковых сигналов. На Windows использует winsound,
-    на остальных ОС — заглушку (можно расширить позже под simpleaudio/playsound)."""
+    на остальных ОС — заглушку (graceful degradation)."""
 
     def __init__(self, alarm_path=None):
         self.alarm_path = str(alarm_path) if alarm_path else None
@@ -35,7 +35,7 @@ class SoundPlayer:
         """Есть ли техническая возможность проигрывать звук."""
         if not _WINSOUND_AVAILABLE:
             return False
-        if self.alarm_path and not os.path.isfile(self.alarm_path):
+        if not self.alarm_path or not os.path.isfile(self.alarm_path):
             return False
         return True
 
@@ -61,7 +61,7 @@ class SoundPlayer:
                 return False
 
     def stop(self):
-        """Останавливает звук (если играет)."""
+        """Принудительно останавливает звук (если играет)."""
         with self._lock:
             self._playing = False
             if not _WINSOUND_AVAILABLE:
@@ -73,6 +73,6 @@ class SoundPlayer:
 
     def mark_stopped(self):
         """Сбросить флаг «играет» без принудительной остановки (для таймера).
-        Используется, когда звук был запущен с флагом 'играет 5 секунд'."""
+        Используется, когда звук был запущен с флагом 'играет N секунд'."""
         with self._lock:
             self._playing = False

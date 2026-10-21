@@ -18,6 +18,7 @@ SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS plates_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     plate_raw TEXT NOT NULL,
+    plate_ocr_original TEXT,
     plate_norm TEXT NOT NULL,
     timestamp TEXT NOT NULL,
     frame_path TEXT NOT NULL,
@@ -74,18 +75,6 @@ def open_conn():
         conn.close()
 
 
-def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_FILE), timeout=10)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-    except sqlite3.DatabaseError:
-        pass
-    return conn
-
-
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     try:
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -106,6 +95,7 @@ def init_db():
             ("plates_log", "reviewed", "INTEGER DEFAULT 0"),
             ("plates_log", "mode", "TEXT DEFAULT 'detection'"),
             ("plates_log", "barrier_opened", "INTEGER DEFAULT 0"),
+            ("plates_log", "plate_ocr_original", "TEXT"),
         ]
         for table, column, coltype in migrations:
             if not _column_exists(conn, table, column):
@@ -126,20 +116,6 @@ def _delete_photo_files(paths: list):
                 os.remove(p)
             except OSError as e:
                 logger.warning("Не удалось удалить файл %s: %s", p, e)
-
-
-def _delete_folder_contents(folder):
-    if not folder:
-        return
-    folder = str(folder)
-    if os.path.isdir(folder):
-        for f in os.listdir(folder):
-            full = os.path.join(folder, f)
-            if os.path.isfile(full):
-                try:
-                    os.remove(full)
-                except OSError as e:
-                    logger.warning("Не удалось удалить файл %s: %s", full, e)
 
 
 def _collect_photos_from_rows(rows) -> list:
@@ -250,15 +226,22 @@ def update_watch_with_photos(plate_norm: str, photo_full: str, photo_crop: str):
 # -----------------------------------------------------------------------------
 def log_detection(plate_raw, plate_norm, ts, frame_path, plate_crop_path,
                   yolo_conf, ocr_score, winner, mode="detection",
-                  barrier_opened: int = 0) -> bool:
+                  barrier_opened: int = 0,
+                  plate_ocr_original: str = None) -> bool:
+    """Запись в журнал.
+
+    plate_ocr_original — что распознал OCR изначально (для аудита).
+    Если не передан — считается равным plate_raw.
+    """
     try:
+        ocr_orig = plate_ocr_original if plate_ocr_original is not None else plate_raw
         with open_conn() as conn:
             conn.execute(
                 """INSERT INTO plates_log
-                (plate_raw, plate_norm, timestamp, frame_path, plate_crop_path,
-                yolo_conf, ocr_score, winner, mode, barrier_opened)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (plate_raw, plate_norm, ts, frame_path, plate_crop_path,
+                (plate_raw, plate_ocr_original, plate_norm, timestamp, frame_path,
+                 plate_crop_path, yolo_conf, ocr_score, winner, mode, barrier_opened)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (plate_raw, ocr_orig, plate_norm, ts, frame_path, plate_crop_path,
                  yolo_conf, ocr_score, winner, mode, int(barrier_opened)),
             )
             conn.commit()
@@ -329,21 +312,32 @@ def get_log_stats() -> Dict[str, Any]:
 # БАЗА 2 — РАЗРЕШЁННЫЕ НОМЕРА
 # -----------------------------------------------------------------------------
 def add_plate(plate: str, status: str = "allowed"):
+    """Добавить в «свои» или «контроль».
+
+    При повторном добавлении использует ON CONFLICT DO UPDATE —
+    сохраняет существующие фото (photo_full/photo_crop).
+    """
     ts = datetime.now().isoformat()
     plate_norm = normalize_plate(plate)
     with open_conn() as conn:
         if status == "allowed":
             conn.execute(
-                """INSERT OR REPLACE INTO plates_allowed
-                (plate_norm, plate_raw, added_at, notes)
-                VALUES (?, ?, ?, ?)""",
-                (plate_norm, plate, ts, None),
+                """INSERT INTO plates_allowed (plate_norm, plate_raw, added_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(plate_norm) DO UPDATE SET
+                       plate_raw = excluded.plate_raw,
+                       added_at = excluded.added_at""",
+                (plate_norm, plate, ts),
             )
         else:
             conn.execute(
-                """INSERT OR REPLACE INTO plates_watch
-                (plate_norm, plate_raw, added_at, reason, active)
-                VALUES (?, ?, ?, ?, 1)""",
+                """INSERT INTO plates_watch (plate_norm, plate_raw, added_at, reason, active)
+                   VALUES (?, ?, ?, ?, 1)
+                   ON CONFLICT(plate_norm) DO UPDATE SET
+                       plate_raw = excluded.plate_raw,
+                       added_at = excluded.added_at,
+                       reason = excluded.reason,
+                       active = 1""",
                 (plate_norm, plate, ts, "manual"),
             )
         conn.commit()
@@ -393,6 +387,7 @@ def get_allowed_list() -> List[Dict[str, Any]]:
 # БАЗА 3 — СПИСОК КОНТРОЛЯ
 # -----------------------------------------------------------------------------
 def add_watch_plate(plate_raw: str, plate_norm: str, reason: str) -> bool:
+    """Добавить в «контроль» (сохраняет существующие фото при повторном добавлении)."""
     try:
         ts = datetime.now().isoformat()
         norm = normalize_plate(plate_norm) if plate_norm else normalize_plate(plate_raw)
@@ -400,9 +395,13 @@ def add_watch_plate(plate_raw: str, plate_norm: str, reason: str) -> bool:
             norm = normalize_plate(plate_raw)
         with open_conn() as conn:
             conn.execute(
-                """INSERT OR REPLACE INTO plates_watch
-                (plate_norm, plate_raw, added_at, reason, active)
-                VALUES (?, ?, ?, ?, 1)""",
+                """INSERT INTO plates_watch (plate_norm, plate_raw, added_at, reason, active)
+                   VALUES (?, ?, ?, ?, 1)
+                   ON CONFLICT(plate_norm) DO UPDATE SET
+                       plate_raw = excluded.plate_raw,
+                       added_at = excluded.added_at,
+                       reason = excluded.reason,
+                       active = 1""",
                 (norm, plate_raw, ts, reason),
             )
             conn.commit()
@@ -452,9 +451,9 @@ def get_log_list(limit: int = 100, unreviewed_only: bool = False) -> List[Dict[s
     with open_conn() as conn:
         if unreviewed_only:
             rows = conn.execute(
-                """SELECT id, plate_raw, plate_norm, timestamp, frame_path,
-                   plate_crop_path, yolo_conf, ocr_score, winner, reviewed,
-                   mode, barrier_opened
+                """SELECT id, plate_raw, plate_ocr_original, plate_norm, timestamp,
+                   frame_path, plate_crop_path, yolo_conf, ocr_score, winner,
+                   reviewed, mode, barrier_opened
                    FROM plates_log
                    WHERE reviewed = 0
                    ORDER BY id DESC
@@ -463,9 +462,9 @@ def get_log_list(limit: int = 100, unreviewed_only: bool = False) -> List[Dict[s
             ).fetchall()
         else:
             rows = conn.execute(
-                """SELECT id, plate_raw, plate_norm, timestamp, frame_path,
-                   plate_crop_path, yolo_conf, ocr_score, winner, reviewed,
-                   mode, barrier_opened
+                """SELECT id, plate_raw, plate_ocr_original, plate_norm, timestamp,
+                   frame_path, plate_crop_path, yolo_conf, ocr_score, winner,
+                   reviewed, mode, barrier_opened
                    FROM plates_log
                    ORDER BY id DESC
                    LIMIT ?""",
@@ -475,6 +474,11 @@ def get_log_list(limit: int = 100, unreviewed_only: bool = False) -> List[Dict[s
 
 
 def update_plate_reviewed(log_id: int, plate_raw: str = None, plate_norm: str = None) -> bool:
+    """Отметить запись проверенной.
+
+    Если оператор исправил номер — обновляет plate_raw/plate_norm,
+    но plate_ocr_original остаётся прежним (для аудита).
+    """
     try:
         with open_conn() as conn:
             if plate_raw is not None and plate_norm is not None:

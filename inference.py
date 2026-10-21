@@ -18,6 +18,8 @@ from utils import normalize_plate, to_cyrillic, is_valid_russian_plate
 
 
 class CRNN(nn.Module):
+    """CRNN: CNN (глаза) + LSTM (чтение) + Linear (классификатор)."""
+
     def __init__(self, num_classes):
         super(CRNN, self).__init__()
         self.cnn = nn.Sequential(
@@ -57,6 +59,8 @@ class CRNN(nn.Module):
 
 
 class YOLODetector:
+    """YOLOv8 детектор номеров + ByteTrack трекинг."""
+
     def __init__(self, model_path: str, device: torch.device):
         self.model = YOLO(model_path)
         self.model.to(device)
@@ -97,8 +101,10 @@ class YOLODetector:
 
 
 class CRNNRecognizer:
+    """CRNN-распознаватель, загрузка INT8-модели с fallback на float."""
+
     def __init__(self, model_path: str, device: torch.device):
-        self.device = torch.device("cpu")
+        self.device = torch.device("cpu")  # INT8-fbgemm — только x86 CPU
         self.transform = transforms.Compose([
             transforms.ToPILImage(), transforms.Grayscale(),
             transforms.Resize((OCR_IMG_HEIGHT, OCR_IMG_WIDTH)),
@@ -178,7 +184,7 @@ class CRNNRecognizer:
         return text, to_cyrillic(text), plate_image, score
 
     def _decode_with_score(self, preds: torch.Tensor) -> Tuple[str, float]:
-        # preds: (T, B, C) в log_softmax
+        """CTC-декодирование + геометрическое среднее вероятностей."""
         probs = preds.permute(1, 0, 2)[0]  # (T, C)
         idxs = probs.argmax(dim=1)
         max_log_probs = probs.gather(1, idxs.unsqueeze(1)).squeeze(1)
@@ -189,8 +195,6 @@ class CRNNRecognizer:
 
         for pos, char_idx in enumerate(idxs.tolist()):
             if char_idx == 0:
-                # blank — сбрасываем "последний символ", чтобы
-                # одинаковые символы через blank давали ДВА символа
                 last_char_idx = 0
                 continue
             if char_idx != last_char_idx:
@@ -207,6 +211,7 @@ class CRNNRecognizer:
         score = max(0.0, min(1.0, score))
         return text, score
 
+
 class Visualizer:
     @staticmethod
     def draw_results(frame: np.ndarray, results: List[Dict[str, Any]]) -> np.ndarray:
@@ -220,43 +225,19 @@ class Visualizer:
 
 
 class ANPR_Pipeline:
+    """Главный пайплайн: детекция → OCR → валидация → голосование по треку."""
+
     def __init__(self, recognizer: CRNNRecognizer):
         self.recognizer = recognizer
         self.track_history = {}
         self.TRACK_BUFFER_SIZE = 15
         self.MIN_VOTES_TO_SHOW = 5
         self.MIN_YOLO_CONF = 0.65
-
-    def _order_points(self, pts: np.ndarray) -> np.ndarray:
-        rect = np.zeros((4, 2), dtype="float32")
-        s = pts.sum(axis=1)
-        rect[0] = pts[np.argmin(s)]
-        rect[2] = pts[np.argmax(s)]
-        diff = np.diff(pts, axis=1)
-        rect[1] = pts[np.argmin(diff)]
-        rect[3] = pts[np.argmax(diff)]
-        return rect
-
-    def _four_point_transform(self, image: np.ndarray, pts: np.ndarray) -> np.ndarray:
-        rect = self._order_points(pts)
-        (tl, tr, br, bl) = rect
-        widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
-        widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
-        maxWidth = max(int(widthA), int(widthB))
-        heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
-        heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
-        maxHeight = max(int(heightA), int(heightB))
-        if maxWidth <= 0 or maxHeight <= 0:
-            return image
-        dst = np.array([
-            [0, 0], [maxWidth - 1, 0],
-            [maxWidth - 1, maxHeight - 1], [0, maxHeight - 1],
-        ], dtype="float32")
-        M = cv2.getPerspectiveTransform(rect, dst)
-        return cv2.warpPerspective(image, M, (maxWidth, maxHeight))
+        self._MAX_TRACK_HISTORY = 500
 
     @staticmethod
     def preprocess_plate_crop(plate_crop: np.ndarray) -> np.ndarray:
+        """CLAHE + лёгкое размытие — для двухпроходного OCR."""
         if plate_crop is None or plate_crop.size == 0:
             return plate_crop
         img = plate_crop
@@ -272,6 +253,11 @@ class ANPR_Pipeline:
         return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
 
     def recognize_two_pass(self, plate_crop: np.ndarray) -> Dict[str, Any]:
+        """Два прохода OCR (сырой + CLAHE). Возвращает оба результата и победителя.
+
+        winner: 'tie' (результаты совпали после нормализации) / 'raw' / 'proc'.
+        Используется в app.py для сомнительных случаев (needs_review).
+        """
         raw_text, raw_score = self.recognizer.recognize(plate_crop)
         raw_cyr = to_cyrillic(raw_text)
         proc_crop = self.preprocess_plate_crop(plate_crop)
@@ -312,14 +298,13 @@ class ANPR_Pipeline:
             "proc_score": proc_score,
         }
 
-    def process(self, plate_crop: np.ndarray, recognizer=None):
-        result = self.recognize_two_pass(plate_crop)
-        return (
-            result["proc_text"],
-            result["proc_cyr"],
-            result["proc_crop"],
-            result["proc_score"],
-        )
+    def _maybe_cleanup_track_history(self):
+        """Ограничивает рост track_history при длинной работе."""
+        if len(self.track_history) > self._MAX_TRACK_HISTORY:
+            # dict сохраняет порядок вставки — удаляем самые старые половину
+            n_drop = len(self.track_history) - self._MAX_TRACK_HISTORY // 2
+            for k in list(self.track_history.keys())[:n_drop]:
+                del self.track_history[k]
 
     def process_frame(self, frame: np.ndarray, detections: List) -> List:
         results = []
@@ -394,6 +379,8 @@ class ANPR_Pipeline:
                 "needs_review": needs_review,
                 "ocr_score": ocr_score,
             })
+
+        self._maybe_cleanup_track_history()
         return results
 
 

@@ -7,11 +7,15 @@ from config import COLOR_CARD, COLOR_WARNING, COLOR_SUCCESS, COLOR_TEXT_DIM
 
 
 class ManualChoiceDialog:
-    """Диалог выбора варианта распознавания.
+    """Диалог выбора варианта распознавания (для сомнительных случаев).
 
-    После создания вызвать: parent.wait_window(dialog.top)
-    Затем прочитать: dialog.result ("raw"/"processed"/"manual"/auto_winner/None)
-                     dialog.manual_plate (если result == "manual")
+    Открывается, когда оба прохода OCR согласны (tie), но оба неуверенны.
+    Оператор может: выбрать сырой, выбрать обработанный, ввести вручную,
+    принять авто-выбор или отменить.
+
+    После закрытия прочитать:
+        dialog.result        — "raw" / "processed" / "manual" / None
+        dialog.manual_plate  — если result == "manual", введённый текст
     """
 
     def __init__(self, parent, raw_cyr, proc_cyr, raw_crop, proc_crop,
@@ -37,6 +41,7 @@ class ManualChoiceDialog:
         cols = ctk.CTkFrame(self.top, fg_color="transparent")
         cols.pack(fill="both", expand=True, padx=20, pady=5)
 
+        # ── Левая колонка: сырая вырезка ──
         left = ctk.CTkFrame(cols, fg_color=COLOR_CARD, corner_radius=12)
         left.pack(side="left", fill="both", expand=True, padx=(0, 10))
         ctk.CTkLabel(left, text="Сырая вырезка",
@@ -54,6 +59,7 @@ class ManualChoiceDialog:
                       width=240, height=50,
                       font=ctk.CTkFont(size=14, weight="bold")).pack(pady=12)
 
+        # ── Правая колонка: обработанная вырезка ──
         right = ctk.CTkFrame(cols, fg_color=COLOR_CARD, corner_radius=12)
         right.pack(side="right", fill="both", expand=True, padx=(10, 0))
         ctk.CTkLabel(right, text="Обработанная (коррекция)",
@@ -71,6 +77,7 @@ class ManualChoiceDialog:
                       width=240, height=50,
                       font=ctk.CTkFont(size=14, weight="bold")).pack(pady=12)
 
+        # ── Ручной ввод ──
         manual_frame = ctk.CTkFrame(self.top, fg_color=COLOR_CARD, corner_radius=12)
         manual_frame.pack(fill="x", padx=20, pady=12)
         ctk.CTkLabel(manual_frame, text="✏️  Ввести номер вручную",
@@ -92,7 +99,14 @@ class ManualChoiceDialog:
                       width=220, height=50,
                       font=ctk.CTkFont(size=13, weight="bold")).pack(side="left", padx=6)
 
-        auto_label = "сырая" if auto_winner == "raw" else "обработанная"
+        # Подпись авто-выбора
+        if auto_winner == "raw":
+            auto_label = "сырая"
+        elif auto_winner in ("proc", "processed"):
+            auto_label = "обработанная"
+        else:  # tie
+            auto_label = "не определён (оба прохода согласны) — по умолчанию сырая"
+
         ctk.CTkLabel(
             self.top,
             text=f"Автоматический выбор: {auto_label}",
@@ -121,12 +135,25 @@ class ManualChoiceDialog:
         pil.thumbnail(size)
         return ImageTk.PhotoImage(pil)
 
-    def _choose(self, which):
+    def _choose(self, which: str):
+        """which: 'raw' или 'processed'."""
         self.result = which
         self.top.destroy()
 
     def _accept_auto(self):
-        self.result = self.auto_winner
+        """Принять авто-выбор с корректным маппингом значений.
+
+        'tie' в recognize_two_pass означает «оба прохода согласны» — при
+        авто-выборе берём сырой как базовый (он не искажён обработкой).
+        'proc' приводим к 'processed' — так ожидает app.py.
+        """
+        mapping = {
+            "raw": "raw",
+            "proc": "processed",
+            "processed": "processed",
+            "tie": "raw",
+        }
+        self.result = mapping.get(self.auto_winner, "raw")
         self.top.destroy()
 
     def _accept_manual(self):
@@ -136,109 +163,6 @@ class ManualChoiceDialog:
         self.result = "manual"
         self.manual_plate = text
         self.top.destroy()
-
-    def _cancel(self):
-        self.result = None
-        self.top.destroy()
-
-
-class ManualInputDialog:
-    """Упрощённый ручной ввод номера.
-
-    После создания вызвать: parent.wait_window(dialog.top)
-    Затем прочитать: dialog.result (строка или None)
-                     dialog.chosen_crop ("raw" / "processed")
-    """
-
-    def __init__(self, parent, raw_cyr, proc_cyr, raw_crop, proc_crop):
-        self.result = None
-        self.chosen_crop = None
-
-        self.top = ctk.CTkToplevel(parent)
-        self.top.title("Ручной ввод номера")
-        self.top.geometry("820x480")
-        self.top.transient(parent)
-        self.top.grab_set()
-        self.top.resizable(False, False)
-
-        ctk.CTkLabel(
-            self.top, text="✏️  Введите правильный номер",
-            font=ctk.CTkFont(size=18, weight="bold"),
-            text_color=COLOR_WARNING,
-        ).pack(pady=15)
-
-        cols = ctk.CTkFrame(self.top, fg_color="transparent")
-        cols.pack(fill="x", padx=20)
-
-        left = ctk.CTkFrame(cols, fg_color=COLOR_CARD, corner_radius=10)
-        left.pack(side="left", fill="both", expand=True, padx=(0, 8))
-        ctk.CTkLabel(left, text="Сырая", font=ctk.CTkFont(size=12)).pack(pady=(10, 4))
-        self._raw_photo = self._make_photo(raw_crop, (280, 100))
-        ctk.CTkLabel(left, image=self._raw_photo, text="").pack(pady=6)
-        ctk.CTkLabel(left, text=raw_cyr or "—",
-                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(0, 10))
-
-        right = ctk.CTkFrame(cols, fg_color=COLOR_CARD, corner_radius=10)
-        right.pack(side="right", fill="both", expand=True, padx=(8, 0))
-        ctk.CTkLabel(right, text="Обработанная",
-                     font=ctk.CTkFont(size=12)).pack(pady=(10, 4))
-        self._proc_photo = self._make_photo(proc_crop, (280, 100))
-        ctk.CTkLabel(right, image=self._proc_photo, text="").pack(pady=6)
-        ctk.CTkLabel(right, text=proc_cyr or "—",
-                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(0, 10))
-
-        ctk.CTkLabel(self.top, text="Правильный номер:",
-                     font=ctk.CTkFont(size=14)).pack(pady=(18, 6))
-        self.entry_var = tk.StringVar()
-        entry = ctk.CTkEntry(
-            self.top, textvariable=self.entry_var,
-            font=ctk.CTkFont(size=22, weight="bold"),
-            width=400, height=56, justify="center",
-            placeholder_text="А123ВС77")
-        entry.pack(pady=6)
-        entry.focus_set()
-        entry.bind("<Return>", lambda e: self._accept())
-
-        ctk.CTkLabel(self.top, text="Какое превью сохранить?",
-                     font=ctk.CTkFont(size=12),
-                     text_color=COLOR_TEXT_DIM).pack(pady=(14, 4))
-        self.crop_var = tk.StringVar(value="processed")
-        crop_row = ctk.CTkFrame(self.top, fg_color="transparent")
-        crop_row.pack(pady=4)
-        ctk.CTkRadioButton(crop_row, text="Сырая",
-                           variable=self.crop_var,
-                           value="raw").pack(side="left", padx=10)
-        ctk.CTkRadioButton(crop_row, text="Обработанная",
-                           variable=self.crop_var,
-                           value="processed").pack(side="left", padx=10)
-
-        btns = ctk.CTkFrame(self.top, fg_color="transparent")
-        btns.pack(pady=18)
-        ctk.CTkButton(btns, text="✅  Сохранить", command=self._accept,
-                      fg_color=COLOR_SUCCESS, hover_color="#15803d",
-                      width=200, height=50,
-                      font=ctk.CTkFont(size=14, weight="bold")).pack(side="left", padx=6)
-        ctk.CTkButton(btns, text="Отмена", command=self._cancel,
-                      fg_color="gray30", hover_color="gray20",
-                      width=140, height=50,
-                      font=ctk.CTkFont(size=14)).pack(side="left", padx=6)
-
-    def _make_photo(self, bgr_img, size):
-        if bgr_img is None or bgr_img.size == 0:
-            img = np.full((size[1], size[0], 3), 200, dtype=np.uint8)
-        else:
-            img = bgr_img
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        pil = Image.fromarray(rgb)
-        pil.thumbnail(size)
-        return ImageTk.PhotoImage(pil)
-
-    def _accept(self):
-        text = self.entry_var.get().strip()
-        if text:
-            self.result = text
-            self.chosen_crop = self.crop_var.get()
-            self.top.destroy()
 
     def _cancel(self):
         self.result = None

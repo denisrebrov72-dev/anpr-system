@@ -1,6 +1,6 @@
 import threading
 import time
-import sys
+import queue
 
 try:
     import serial
@@ -17,13 +17,17 @@ from config import (
 class ArduinoController:
     """Управление индикацией доступа (зелёный/красный светодиод).
 
-    Протокол (текстовый, \n как разделитель):
-      → GREEN     ← OK:GREEN   (свой номер — зелёный на 3 сек)
-      → RED       ← OK:RED     (чужой номер — красный на 3 сек)
+    Протокол (текстовый, \\n как разделитель):
+      → GREEN     ← OK:GREEN   (свой номер — зелёный на HOLD_MS)
+      → RED       ← OK:RED     (чужой номер — красный на HOLD_MS)
       → CLOSE     ← OK:CLOSE   (выключить оба)
       → PING      ← PONG
 
-    Arduino сам гасит светодиод через HOLD_MS после включения.
+    Прошивка: barrier/barrier.ino. HOLD_MS = 3000 мс по умолчанию —
+    Arduino сама гасит светодиод, Python не тратит ресурсы на таймеры.
+
+    Для реального шлагбаума достаточно заменить светодиод на реле-модуль:
+    протокол не меняется (GREEN = «замкнуть реле», CLOSE = «разомкнуть»).
     """
 
     def __init__(self):
@@ -31,7 +35,9 @@ class ArduinoController:
         self.is_connected = False
         self._lock = threading.Lock()
         self._closing = False
-        self._worker_thread = None
+        self._cmd_queue = queue.Queue()
+        self._worker = None
+        self._worker_stop = threading.Event()
 
         if not ARDUINO_ENABLED:
             return
@@ -63,7 +69,10 @@ class ArduinoController:
             # Проверяем связь командой PING
             if not self._send_command("PING", expect="PONG", timeout=2.0):
                 print("[WARN] Arduino не ответила на PING")
-                self.serial.close()
+                try:
+                    self.serial.close()
+                except Exception:
+                    pass
                 self.serial = None
                 return False
 
@@ -83,12 +92,16 @@ class ArduinoController:
             return False
 
     def disconnect(self):
+        """Корректно завершает работу: останавливает worker, шлёт CLOSE, закрывает порт."""
         self._closing = True
+        self._worker_stop.set()
+        # Разбудить worker, если он ждёт в очереди
+        self._cmd_queue.put((None, None))
 
-        t = self._worker_thread
+        t = self._worker
         if t is not None and t.is_alive():
             try:
-                t.join(timeout=3.0)
+                t.join(timeout=5.0)
             except Exception:
                 pass
 
@@ -110,8 +123,7 @@ class ArduinoController:
     #  ОТПРАВКА КОМАНД
     # ─────────────────────────────────────────────────────────────
     def _send_command(self, cmd: str, expect: str = None, timeout: float = 1.0) -> bool:
-        """Отправляет команду и (опционально) ждёт ответа.
-        Возвращает True, если команда отправлена и (если expect задан) ответ получен."""
+        """Отправляет команду и (опционально) ждёт ответа."""
         if self.serial is None:
             return False
 
@@ -148,26 +160,49 @@ class ArduinoController:
         self._send_async("RED", expect="OK:RED")
 
     def _send_async(self, cmd: str, expect: str = None):
-        """Отправляет команду в отдельном потоке, чтобы не блокировать UI."""
+        """Ставит команду в очередь — не блокирует UI."""
         if not ARDUINO_ENABLED or not PYSERIAL_AVAILABLE:
             return
         if self._closing:
             return
-        if not self.is_connected or self.serial is None:
-            if not self.connect():
-                return
+        self._ensure_worker()
+        self._cmd_queue.put((cmd, expect))
 
-        def _worker():
+    # ─────────────────────────────────────────────────────────────
+    #  РАБОЧИЙ ПОТОК (один на всё время жизни контроллера)
+    # ─────────────────────────────────────────────────────────────
+    def _ensure_worker(self):
+        if self._worker is None or not self._worker.is_alive():
+            self._worker_stop.clear()
+            self._worker = threading.Thread(
+                target=self._worker_loop,
+                daemon=True,
+                name="arduino-worker",
+            )
+            self._worker.start()
+
+    def _worker_loop(self):
+        while not self._worker_stop.is_set():
+            try:
+                item = self._cmd_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            if item is None:  # sentinel — shutdown
+                break
+
+            cmd, expect = item
+            if self._closing:
+                continue
+
             with self._lock:
-                if self.serial is None or self._closing:
-                    return
+                if self.serial is None and not self.connect():
+                    continue
+                if self.serial is None:
+                    continue
                 ok = self._send_command(cmd, expect=expect, timeout=1.5)
                 if not ok:
                     print(f"[WARN] Arduino не подтвердила {cmd}")
-
-        thread = threading.Thread(target=_worker, daemon=True)
-        self._worker_thread = thread
-        thread.start()
 
     # ─────────────────────────────────────────────────────────────
     #  ДИАГНОСТИКА

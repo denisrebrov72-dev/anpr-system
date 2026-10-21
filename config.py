@@ -25,18 +25,22 @@ WATCH_FRAMES_DIR = BASE_DIR / "watch_frames"
 WATCH_CROPS_DIR = BASE_DIR / "watch_crops"
 
 for d in [DEBUG_DIR, LOG_DIR, OURS_DIR, WATCH_DIR, EXPORTS_DIR,
-          FRAMES_DIR, CROPS_DIR,
-          ALLOWED_FRAMES_DIR, ALLOWED_CROPS_DIR,
-          WATCH_FRAMES_DIR, WATCH_CROPS_DIR]:
+            FRAMES_DIR, CROPS_DIR,
+            ALLOWED_FRAMES_DIR, ALLOWED_CROPS_DIR,
+            WATCH_FRAMES_DIR, WATCH_CROPS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # ════════════════════════════════════════════════════════════════
 #  ПАРАМЕТРЫ МОДЕЛИ
-#  (раньше жили в классе Config внутри inference.py)
 OCR_IMG_HEIGHT = 32
 OCR_IMG_WIDTH = 128
 OCR_ALPHABET = '0123456789ABCEHKMOPTXY'
 DETECTION_CONFIDENCE_THRESHOLD = 0.5
+
+# ════════════════════════════════════════════════════════════════
+#  ПАРАМЕТРЫ ОБРАБОТКИ ВИДЕО
+FRAME_SKIP = 3          # обрабатывать каждый N-й кадр (для скорости)
+PLATE_PADDING_RATIO = 0.15
 
 # ════════════════════════════════════════════════════════════════
 #  ЦВЕТА ДЛЯ ИНТЕРФЕЙСА
@@ -77,17 +81,12 @@ COLOR_LOG_UNREVIEWED_BG = "#3A2020"
 COLOR_REVIEWED_TAG = "#10B981"
 
 # ════════════════════════════════════════════════════════════════
-#  НАСТРОЙКИ ДЕТЕКЦИИ
-PROCESS_INTERVAL_SEC = 2.0
-PLATE_PADDING_RATIO = 0.15
-
-# ════════════════════════════════════════════════════════════════
 #  РАСШИРЕНИЯ ФАЙЛОВ
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".wmv")
 
 # ════════════════════════════════════════════════════════════════
-#  НАСТРОЙКИ ARDUINO
+#  НАСТРОЙКИ ARDUINO (индикация доступа: зелёный/красный светодиод)
 ARDUINO_PORT = "COM3"
 ARDUINO_BAUDRATE = 9600
 ARDUINO_ENABLED = True
